@@ -1,84 +1,84 @@
-# 类型级 SQL 约定（typed-sql 库）
+# Type-level SQL conventions (typed-sql)
 
-## 概览
+## Overview
 
-- 原生 `node:sqlite`，零第三方依赖
-- 类型级解析器从 SQL 字符串推导参数与返回值类型，`TypedDb<S>` 提供类型安全的 `prepare().all/get/run`
-- 表类型由 `Schema<T>` 从 `CREATE [TEMP] TABLE IF NOT EXISTS` 语句推导；示例表定义在测试文件（typed-sql-test.ts）中
-- 含外键（`REFERENCES`）的库类型用两段式：`SchemaFks<...>`（解析每段 DDL）+ `ResolveFks<...>`（把引用列与目标列类型取交集），见「外键类型传播」；无外键时 `Schema<S>` 可直接用
+- Built on native `node:sqlite`, zero third-party dependencies
+- A type-level parser derives parameter and return types from SQL strings; `TypedDb<S>` provides type-safe `prepare().all/get/run`
+- Table types are derived from `CREATE [TEMP] TABLE IF NOT EXISTS` statements via `Schema<T>`; sample table definitions live in the test file (typed-sql-test.ts)
+- For schemas with foreign keys (`REFERENCES`), use the two-step flow: `SchemaFks<...>` (parse each DDL chunk) + `ResolveFks<...>` (intersect the referencing column with the target column type), see "Foreign key type propagation"; without foreign keys, `Schema<S>` can be used directly
 
-## API 使用
+## API usage
 
-- `prepare<const T extends string>(sql)` 接受字面量 SQL，返回类型安全的语句对象
-  - `.all(params)` → `T[]`（SELECT 全量结果 / INSERT/UPDATE/DELETE ... RETURNING 操作行）
-  - `.get(params)` → `T | undefined`（取单行 / INSERT/UPDATE/DELETE ... RETURNING 单行，无行返回 `undefined`）
-  - `.run(params)` → `{ lastInsertRowid: number; changes: number }`（INSERT/UPDATE/DELETE；`TypedDb.prepare` 不启用 `readBigInts`，字段恒为 `number`，而 `@types/node` 的 `StatementResultingChanges` 声明为 `number | bigint`）
-- 参数一律传 **object**（命名参数），`node:sqlite` 原生支持，**无需关心属性顺序**
-- `params` 必填：无参数的查询也要传 `{}`（如 `WHERE 1=1`）
+- `prepare<const T extends string>(sql)` accepts a SQL string literal and returns a type-safe statement object
+  - `.all(params)` → `T[]` (full SELECT result / INSERT/UPDATE/DELETE ... RETURNING affected rows)
+  - `.get(params)` → `T | undefined` (single row / a single INSERT/UPDATE/DELETE ... RETURNING row; `undefined` when no row)
+  - `.run(params)` → `{ lastInsertRowid: number; changes: number }` (INSERT/UPDATE/DELETE; `TypedDb.prepare` does not enable `readBigInts`, so fields are always `number`, whereas `StatementResultingChanges` from `@types/node` is declared `number | bigint`)
+- Parameters are always passed as an **object** (named parameters), natively supported by `node:sqlite` — **property order does not matter**
+- `params` is required: even queries without parameters must pass `{}` (e.g. `WHERE 1=1`)
 
 ```ts
-// ✓ 任意顺序
+// ✓ any order
 const u = db.prepare('SELECT ALL * FROM user WHERE user.id = @id ORDER BY 1 LIMIT -1 OFFSET 0').get({ id: 1 });
 ```
 
-## SQL 书写约定
+## SQL writing conventions
 
-### 关键字与标识符
+### Keywords and identifiers
 
-- 解析器按**大写字面**匹配关键字，一律大写：`SELECT`, `ALL`, `DISTINCT`, `FROM`, `WHERE`, `GROUP BY`, `HAVING`, `ORDER BY`, `LIMIT`, `OFFSET`, `INSERT`, `OR`, `INTO`, `VALUES`, `UPDATE`, `SET`, `DELETE`, `AND`, `AS`, `IS`, `NOT IN`, `LIKE`, `NOT LIKE`, `IN`, `BETWEEN`, `NOT NULL`, `PRIMARY KEY`, `RETURNING`
-- 唯一例外：`BETWEEN` 中的 `and` 用小写
-- `ORDER BY` / `GROUP BY` / `HAVING` 的**内容不被校验**（大小写、列名、表达式任意）
-- **表名直接写，必须不写别名**：`FROM user`, `UPDATE OR ABORT user`（`FROM user u` 会解析失败）
-- **INSERT / UPDATE 的冲突处理子句必填**：`INSERT OR <处理> INTO ...`、`UPDATE OR <处理> 表名 SET ...`，`<处理>` 为 `ROLLBACK | ABORT | FAIL | IGNORE | REPLACE` 之一（缺写则解析失败、参数类型退化为 `never`）；`ABORT` 是 SQLite 默认行为，需要默认语义就显式写 `OR ABORT`
-- WHERE 子句用 `table.col`：`user.externalUserId = @externalUserId`
-- **UPDATE 的 SET 子句用裸列名**（`token = @token`）——SQLite 的 SET 不接受 `table.col` 前缀
-- SELECT 列用 `table.col AS name` 投影
+- The parser matches keywords as **literal uppercase**; always write them uppercase: `SELECT`, `ALL`, `DISTINCT`, `FROM`, `WHERE`, `GROUP BY`, `HAVING`, `ORDER BY`, `LIMIT`, `OFFSET`, `INSERT`, `OR`, `INTO`, `VALUES`, `UPDATE`, `SET`, `DELETE`, `AND`, `AS`, `IS`, `NOT IN`, `LIKE`, `NOT LIKE`, `IN`, `BETWEEN`, `NOT NULL`, `PRIMARY KEY`, `RETURNING`
+- The one exception: the `and` inside `BETWEEN` must be lowercase
+- The **content of `ORDER BY` / `GROUP BY` / `HAVING` is not validated** (any case, column name, or expression)
+- **Write the table name directly, never an alias**: `FROM user`, `UPDATE OR ABORT user` (`FROM user u` fails to parse)
+- **INSERT / UPDATE conflict clauses are mandatory**: `INSERT OR <resolver> INTO ...`, `UPDATE OR <resolver> <table> SET ...`, where `<resolver>` is one of `ROLLBACK | ABORT | FAIL | IGNORE | REPLACE` (omitting it fails parsing and the parameter type degrades to `never`); `ABORT` is SQLite's default, write `OR ABORT` explicitly for default semantics
+- WHERE clauses use `table.col`: `user.externalUserId = @externalUserId`
+- **UPDATE SET clauses use bare column names** (`token = @token`) — SQLite's SET does not accept a `table.col` prefix
+- SELECT columns are projected as `table.col AS name`
 
-### 参数：`@name` 命名参数
+### Parameters: `@name` named parameters
 
-- 不用 `?` 占位符，改用 `@名称`
-- 参数名规则按语句区分：
-  - **SELECT** 的 WHERE / LIMIT / OFFSET、**UPDATE** 的 SET / WHERE、**DELETE** 的 WHERE：参数名可任意（如 `@limit`、`@anotherId`）
-  - **INSERT VALUES**：参数名**必须是目标表列名**（非列名参数会被静默丢弃，调用处编译错）
-- 参数类型从对应列类型推导：TEXT → `string`，INTEGER/REAL → `number`，可空列 → `| null`
-- 例外：`LIMIT` / `OFFSET` 的参数恒为 `number`
-- `VALUES` 括号内、`IN` 列表内用「逗号 + 一个空格」分隔参数：`(@a, @b)`
-- 参数值里避免出现字面量 `@`（如 `'email@example.com'`），会被误识别
+- Do not use `?` placeholders; use `@名称` instead
+- Parameter naming rules depend on the statement:
+  - **SELECT** WHERE / LIMIT / OFFSET, **UPDATE** SET / WHERE, **DELETE** WHERE: names may be arbitrary (e.g. `@limit`, `@anotherId`)
+  - **INSERT VALUES**: names **must be target-table column names** (non-column parameters are silently dropped, and the call site fails to compile)
+- Parameter types derive from the corresponding column type: TEXT → `string`, INTEGER/REAL → `number`, nullable columns → `| null`
+- Exception: parameters in `LIMIT` / `OFFSET` are always `number`
+- Inside `VALUES` parentheses and `IN` lists, separate parameters with **comma + one space**: `(@a, @b)`
+- Avoid literal `@` in parameter values (e.g. `'email@example.com'`) — it would be misidentified
 
 ```
-✓ 完整合法示例
+✓ Fully valid examples
 SELECT ALL * FROM user WHERE user.externalUserId = @externalUserId ORDER BY 1 LIMIT -1 OFFSET 0
 INSERT OR ABORT INTO user (username, passwordHash) VALUES (@username, @passwordHash)
 UPDATE OR ABORT user SET token = @token WHERE user.externalUserId = @externalUserId
 INSERT OR REPLACE INTO kfCursor (openKfId, cursor) VALUES (@openKfId, @cursor)
 
-✗ 反例
-SELECT * FROM user WHERE user.externalUserId = @externalUserId        # 缺 ALL、缺 ORDER BY/LIMIT/OFFSET
-SELECT ALL * FROM user WHERE externalUserId = @id ORDER BY 1 LIMIT -1 OFFSET 0   # WHERE 缺 user. 前缀
-INSERT INTO user (username) VALUES (@username)                        # 缺 OR 冲突子句
-UPDATE user SET token = @token WHERE user.externalUserId = @externalUserId  # 缺 OR 冲突子句
-FROM user u                                                          # 表别名
-VALUES (@a,@b)                                                       # 逗号后缺空格
+✗ Counter-examples
+SELECT * FROM user WHERE user.externalUserId = @externalUserId        # missing ALL, ORDER BY/LIMIT/OFFSET
+SELECT ALL * FROM user WHERE externalUserId = @id ORDER BY 1 LIMIT -1 OFFSET 0   # WHERE missing user. prefix
+INSERT INTO user (username) VALUES (@username)                        # missing OR conflict clause
+UPDATE user SET token = @token WHERE user.externalUserId = @externalUserId  # missing OR conflict clause
+FROM user u                                                          # table alias
+VALUES (@a,@b)                                                       # missing space after comma
 ```
 
-### 严格格式（解析器不做空白归一化）
+### Strict formatting (the parser does not normalize whitespace)
 
-| 规则 | 原因 |
-|------|------|
-| SQL 字符串 **无前导或尾随空白** | 类型以 `SELECT`/`INSERT`/`UPDATE` 开头直接匹配 |
-| `FROM 表名` 后必须**恰好一个空格**再接 ` WHERE`，无多余空白 | 模板用 `FROM ${FromClause} WHERE` 取表名；表名后多余空格会让 `_NewTables` 查不到表，列全部退化为 `{}` |
-| CREATE TABLE **列定义顶格写**（每行 column 0 开始，无缩进） | `ParseCols` 用 `Split<Rest, ",\n">` 拆分列；表级约束用 `,\n\n`（末列逗号 + 空行）截断，见下方「表级约束」 |
-| SELECT 列列表 **逗号后跟一个空格**：`col1, col2` | `Split<Cols, ', '>` 分隔列名 |
-| SELECT 模板：`SELECT {ALL\|DISTINCT} <cols> FROM <table> WHERE <cond> ORDER BY ... LIMIT ... OFFSET ...`，**GROUP BY/HAVING 可选且成对出现** | `_MatchSelect` 按带/不带 GROUP BY 两个变体匹配；GROUP BY 若被吞进 WHERE 会破坏 `IS NULL` 收窄 |
-| 聚合必须位于**列表达式开头**，不得包在其他函数内（如 `COALESCE(SUM(x),0)`） | `ColType` 只匹配以聚合开头的表达式，包裹后落入 T.C 分支得 `unknown` |
-| `BETWEEN` 中的 `AND` 用小写 `and` | 避免被 WHERE-level ` AND ` 误拆分 |
+| Rule | Reason |
+|------|--------|
+| SQL strings must have **no leading or trailing whitespace** | The type matches `SELECT`/`INSERT`/`UPDATE` directly at the start |
+| `FROM <table>` must be followed by **exactly one space** before ` WHERE`, no extra whitespace | The template `FROM ${FromClause} WHERE` extracts the table name; extra whitespace after the table name makes `_NewTables` miss the table and all columns degrade to `{}` |
+| CREATE TABLE **column definitions must start at column 0** (no indentation) | `ParseCols` splits columns with `Split<Rest, ",\n">`; table-level constraints are truncated at `,\n\n` (last-column comma + blank line), see "Table-level constraints" below |
+| SELECT column lists need **comma + one space**: `col1, col2` | `Split<Cols, ', '>` separates column names |
+| SELECT template: `SELECT {ALL\|DISTINCT} <cols> FROM <table> WHERE <cond> ORDER BY ... LIMIT ... OFFSET ...`, **GROUP BY/HAVING optional but paired** | `_MatchSelect` matches two variants with/without GROUP BY; a GROUP BY swallowed into WHERE breaks `IS NULL` narrowing |
+| Aggregates must sit **at the start of the column expression**, not wrapped in other functions (e.g. `COALESCE(SUM(x),0)`) | `ColType` only matches expressions starting with an aggregate; wrapping falls through to the `T.C` branch and yields `unknown` |
+| The `AND` in `BETWEEN` is lowercase `and` | Prevents being split by the WHERE-level ` AND ` |
 
-### 表级约束
+### Table-level constraints
 
-- 表级约束（`PRIMARY KEY (a, b)` / `UNIQUE (a, b)` / 表级 `CHECK (...)` / `FOREIGN KEY (a) REFERENCES parent(b)`）写在列定义**下方**，用**空行**与列区隔开；**列区最后一行以逗号结尾**（合法分隔符，不是尾逗号）
-- `ParseCols` 按 `,\n\n`（末列逗号 + 空行）截断，约束块**整体忽略**——表级约束不改变列类型（SQLite 中表级 PK/UNIQUE/FK 不影响列可空性，表级 CHECK 不参与枚举推导），忽略即正确
-- 空行必须**真空白**（无空格）；约束块内容整体忽略，内部怎么写（多行、内部再空行）都不影响列区解析
-- 无约束的表照旧：列区最后一行无逗号、无空行，直接 `\n)`（现有 DDL 无需改动）
+- Table-level constraints (`PRIMARY KEY (a, b)` / `UNIQUE (a, b)` / table-level `CHECK (...)` / `FOREIGN KEY (a) REFERENCES parent(b)`) are written **below** the column definitions, separated from the column area by a **blank line**; the **last column line ends with a comma** (valid separator, not a trailing comma)
+- `ParseCols` truncates at `,\n\n` (last-column comma + blank line) and **ignores the constraint block entirely** — table-level constraints do not change column types (in SQLite, table-level PK/UNIQUE/FK do not affect column nullability, and table-level CHECK does not participate in enum derivation), so ignoring them is correct
+- The blank line must be **truly empty** (no spaces); the constraint block is ignored wholesale, so however it is formatted (multi-line, inner blank lines) does not affect column parsing
+- Tables without constraints stay as before: the last column line has no comma and no blank line, ending directly with `\n)` (existing DDL needs no changes)
 
 ```sql
 CREATE TABLE IF NOT EXISTS orderItem (
@@ -88,22 +88,22 @@ CREATE TABLE IF NOT EXISTS orderItem (
 
   PRIMARY KEY (orderId, itemId)
 )
--- → Schema 推导为 { orderItem: { orderId: number; itemId: number; quantity: number } }，无 PRIMARY 幽灵列
+-- → Schema derives { orderItem: { orderId: number; itemId: number; quantity: number } }, no PRIMARY phantom column
 ```
 
-### 查询结果
+### Query results
 
-- `.all()` 统一返回 `T[]`；取单行用 `.get()` → `T | undefined`
+- `.all()` always returns `T[]`; use `.get()` for a single row → `T | undefined`
 
-### 动态排序（ORDER BY 白名单变体）
+### Dynamic sorting (ORDER BY allowlist variants)
 
-**为什么 ORDER BY 不能参数化 / 插值：**
-- 绑定参数只能绑**值**，不能绑**标识符**：`ORDER BY ?` / `ORDER BY @col` 实测不排序（返回插入序）；方向更绑不了（`ORDER BY createdAt ?` 是语法错误）
-- CASE 参数化替代在本库不可行：ORDER BY 不参与参数提取（见「设计边界」），`@sortBy`/`@dir` 不会进入 `SqlAllParams` 类型
-- 插值有注入风险：实测 `ORDER BY (SELECT token FROM user ...)` 这种单语句子查询可执行并泄露数据（`; DROP` 多语句被 node:sqlite 挡，但子查询挡不住）
-- 正确做法 = **列白名单 + 预编译静态变体**（业界对动态排序的标准做法）：列/方向全部枚举成静态 SQL，运行时只做键选择
+**Why ORDER BY cannot be parameterized / interpolated:**
+- Bind parameters can only bind **values**, not **identifiers**: `ORDER BY ?` / `ORDER BY @col` does not sort (returns insertion order, verified); a direction cannot be bound at all (`ORDER BY createdAt ?` is a syntax error)
+- A CASE-parameterized alternative does not work in this library: ORDER BY does not participate in parameter extraction (see "Design boundaries"), so `@sortBy`/`@dir` never enter the `SqlAllParams` type
+- Interpolation is an injection risk: verified that a single-statement subquery like `ORDER BY (SELECT token FROM user ...)` executes and leaks data (`; DROP` multi-statements are blocked by node:sqlite, but a subquery is not)
+- The correct approach = **column allowlist + precompiled static variants** (the industry-standard way to do dynamic sorting): enumerate all columns/directions as static SQL, and the runtime only selects a key
 
-**推荐写法**（参考 typed-sql-test.ts 的 `markListSql`）：
+**Recommended pattern** (see `markListSql` in typed-sql-test.ts):
 
 ```ts
 const makeSql = <const C extends keyof Tables['markRecord'], const D extends 'asc' | 'desc'>(
@@ -119,108 +119,107 @@ const markListSql = {
   'costCredits.desc': makeSql('costCredits', 'desc'),
 };
 
-// 调用侧：键是字面量联合，写错键编译报错
+// Call site: keys are a literal union; a wrong key is a compile error
 const rows = db.prepare(markListSql[key]).all({ limit: 50, offset: 0 });
 ```
 
-- `C extends keyof Tables['markRecord']` → 该表所有列自动可排，DDL 新增列无需改 makeSql 签名；方向保持 `'asc' | 'desc'` 字面量
-- 每个键得到**精确的单条 SQL 字面量**，`prepare` 据此推导参数/返回值，全类型、零注入
-- 每加一个排序组合 = 加一行对象字面量；非法键在编译期被掐死
-- **`as const` 是类型安全的前提**：`makeSql` 必须用泛型 `const C/D` 且返回值 `as const`（显式返回类型注解也可，但非必需），缺一会把返回类型宽化成 `string`，`prepare` 参数退化 `never`
-- 不要用 `['a','b'].map` 运行时生成对象——键会退化成 `string` 索引；对象字面量直接写
-- 主排序后的次级排序键（tiebreak）写死即可（如 `id ASC`），保证非法输入也有可预测顺序
+- `C extends keyof Tables['markRecord']` → every column of that table is sortable automatically; a new column added in DDL needs no change to the `makeSql` signature; directions stay as `'asc' | 'desc'` literals
+- Each key yields an **exact single SQL literal**, from which `prepare` derives the params/results — fully typed, zero injection
+- Adding one sort combination = adding one object-literal line; an invalid key is killed at compile time
+- **`as const` is a prerequisite for type safety**: `makeSql` must use generic `const C/D` and the return value must be `as const` (an explicit return type annotation also works but is not required); dropping either widens the return type to `string` and `prepare` params degrade to `never`
+- Do not generate the object at runtime with `['a','b'].map` — keys would degrade to a `string` index; write the object literal directly
+- The tiebreak key after the primary sort can be hardcoded (e.g. `id ASC`) to guarantee a predictable order even for inputs that cannot occur
 
 ### INSERT/UPDATE/DELETE ... RETURNING
 
-- 在语句末尾追加 `RETURNING <列>`，`.all()` / `.get()` 返回受影响的行：
-  - `INSERT OR ABORT INTO user (...) VALUES (...) RETURNING id` → `{ id: string }`（插入行）
-  - `UPDATE OR ABORT user SET token = @token WHERE user.externalUserId = @externalUserId RETURNING externalUserId` → `{ externalUserId: string }[]`（更新行）
-  - `DELETE FROM markRecord WHERE markRecord.id = @id RETURNING id` → `{ id: number }[]`（删除行）
-- **只写裸列名**，「逗号 + 一个空格」分隔：`RETURNING id, createdAt`；或 `RETURNING *` 返回整行
-- 不支持 `表名.` 前缀、不支持 `AS` 别名、不支持表达式——这类写法类型退化为 `{}`（警示信号）
-- 参数仍来自原语句（VALUES / SET / WHERE）：RETURNING 列只决定返回的列，RETURNING 内禁止 `@参数`
-- `.run()` 不因 RETURNING 改变，仍返回 `{ lastInsertRowid: number; changes: number }`
-- 无匹配行时（`OR IGNORE` 吞掉插入 / UPDATE/DELETE 无匹配 WHERE）：`.all()` 返回 `[]`，`.get()` 返回 `undefined`
+- Append `RETURNING <cols>` at the end of the statement; `.all()` / `.get()` return the affected rows:
+  - `INSERT OR ABORT INTO user (...) VALUES (...) RETURNING id` → `{ id: string }` (inserted row)
+  - `UPDATE OR ABORT user SET token = @token WHERE user.externalUserId = @externalUserId RETURNING externalUserId` → `{ externalUserId: string }[]` (updated rows)
+  - `DELETE FROM markRecord WHERE markRecord.id = @id RETURNING id` → `{ id: number }[]` (deleted rows)
+- **Bare column names only**, separated by **comma + one space**: `RETURNING id, createdAt`; or `RETURNING *` for the full row
+- `table.` prefixes, `AS` aliases, and expressions are unsupported — those degrade to `{}` (a warning signal)
+- Params still come from the original statement (VALUES / SET / WHERE): RETURNING columns only decide which columns come back; **no `@params` inside RETURNING**
+- `.run()` is unaffected by RETURNING and still returns `{ lastInsertRowid: number; changes: number }`
+- With no matching rows (an `OR IGNORE` swallowed insert / an UPDATE/DELETE whose WHERE matched nothing): `.all()` returns `[]`, `.get()` returns `undefined`
 
-### 枚举列：`CHECK (... IN (...))`
+### Enum columns: `CHECK (... IN (...))`
 
-- 用列级 `CHECK` 的 `IN` 形式声明枚举，类型层推导为字面量联合：
+- Declare an enum with a column-level `CHECK` using the `IN` form; the type derives to a literal union:
   `status TEXT NOT NULL CHECK (status IN ('pending', 'confirmed'))` → `'pending' | 'confirmed'`
-- 字符串值用**单引号**，数值裸写（`score INTEGER CHECK (score IN (1, 2, 3))` → `1 | 2 | 3`）
-- 列表用「逗号 + 一个空格」分隔；值内不得含单引号
-- 枚举类型自动传播：`SELECT *` 结果列、WHERE / SET / INSERT VALUES 参数全部收窄
-- 可空列（无 `NOT NULL`）→ `| null`；NULL 恒通过 CHECK（SQLite 语义）
-- 仅支持简单单列 `CHECK (col IN (...))`；范围式（`CHECK (cost > 0)`）、多条件 CHECK 不参与枚举推导，列回落到对应基础类型
-- 只有 `CHECK (本列名 IN (...))` 参与推导；引用其他列（`CHECK (score IN (1,2,3))` 写在 status 上）或常量表达式（`CHECK (1 IN (1,2))`）同样回落基础类型
+- String values use **single quotes**, numbers are written bare (`score INTEGER CHECK (score IN (1, 2, 3))` → `1 | 2 | 3`)
+- List items are separated by **comma + one space**; values must not contain single quotes
+- Enum types propagate automatically: `SELECT *` result columns and WHERE / SET / INSERT VALUES params are all narrowed
+- Nullable columns (no `NOT NULL`) → `| null`; NULL always passes CHECK (SQLite semantics)
+- Only simple single-column `CHECK (col IN (...))` is supported; range checks (`CHECK (cost > 0)`) and multi-condition CHECKs do not participate in enum derivation, and the column falls back to its base type
+- Only `CHECK (<this column name> IN (...))` participates; referencing another column (`CHECK (score IN (1,2,3))` written on `status`) or a constant expression (`CHECK (1 IN (1,2))`) likewise falls back to the base type
 
-### 外键类型传播：`REFERENCES tbl(col)`
+### Foreign key type propagation: `REFERENCES tbl(col)`
 
-- 列级 `REFERENCES tbl(col)` 把目标列类型与自身类型**取交集**传给本列：
-  `pid TEXT NOT NULL REFERENCES parent(id)`，而 `parent.id` 是 `TEXT CHECK (id IN ('a', 'b'))` → 子列类型 `'a' | 'b'`（父表无枚举时 `string & string` 恒等，零影响）
-- 多段 DDL 拼成完整库类型：`ResolveFks<SchemaFks<A> & SchemaFks<B> & ...>`；`SchemaFks` 是 raw 解析（列是内部 wrapper），`ResolveFks` 解引用后才是最终 `{ 表: { 列: 类型 } }`。单表无外键时 `Schema<S>` 向后兼容、直接可用
-- **可空性只来自子列自己**：子列可空 → `| null`；父列可空**不传导**（SQLite `MATCH SIMPLE`：子键任一列为 NULL 即满足外键，不需要父表有对应行）
-- 子列自身的类型/枚举保留：`child.pid CHECK (pid IN ('a', 'b')) REFERENCES parent(id)`（父为 `'a'|'b'|'c'`）→ `'a' | 'b'`（自身枚举 ∩ 父类型）
-- 只支持**列级单列** `REFERENCES tbl(col)`；表级 `FOREIGN KEY (...)`、复合外键、`REFERENCES tbl` 省略列不参与类型传播（表级约束块整体忽略）
-- 外键解析**只传导一层**（A→B→C 链时 A 只与 B 取交集，不含 C）——罕见场景，刻意简化
-- **环形外键**（互引用/同表双向，SQLite 合法）不递归：两侧列取各自定义类型的交集，可正常编译
-- 类型是编译期契约：子表插入**不受父表枚举约束**（外键只校验「值在父表现有行中」，见「设计边界」）；父表强迁遗留枚举外值后，子列类型同样可能「说谎」（与父列自身枚举的谎言一致）
+- A column-level `REFERENCES tbl(col)` **intersects** the target column type with its own:
+  `pid TEXT NOT NULL REFERENCES parent(id)`, where `parent.id` is `TEXT CHECK (id IN ('a', 'b'))` → child column type `'a' | 'b'` (when the parent has no enum, `string & string` is the identity and has zero effect)
+- Compose a multi-DDL full schema type: `ResolveFks<SchemaFks<A> & SchemaFks<B> & ...>`; `SchemaFks` is the raw parse (columns are internal wrappers), and only after `ResolveFks` unwraps the references do you get the final `{ table: { column: type } }`. For a single table without foreign keys, `Schema<S>` is backward-compatible and usable directly
+- **Nullability comes only from the child column**: a nullable child → `| null`; a nullable parent does **not** propagate (SQLite `MATCH SIMPLE`: if any child key column is NULL the FK is satisfied without a matching parent row)
+- The child's own type/enum is preserved: `child.pid CHECK (pid IN ('a', 'b')) REFERENCES parent(id)` (parent `'a'|'b'|'c'`) → `'a' | 'b'` (own enum ∩ parent type)
+- Only **column-level single-column** `REFERENCES tbl(col)` is supported; table-level `FOREIGN KEY (...)`, composite foreign keys, and `REFERENCES tbl` without a column do not participate (the table-level constraint block is ignored wholesale)
+- FK resolution **propagates one level only** (in an A→B→C chain, A intersects only with B, not C) — a rare scenario, deliberately simplified
+- **Circular foreign keys** (mutual references / same-table two-way, legal in SQLite) do not recurse: both sides intersect their own declared types and compile fine
+- The type is a compile-time contract: inserting into a child table is **not constrained by the parent's enum** (the FK only validates that the value exists among the parent's current rows, see "Design boundaries"); after the parent is force-migrated to a legacy enum value, the child column type can likewise "lie" (consistent with the parent column's own lie)
 
-## 类型推导规则
+## Type derivation rules
 
-### 参数类型：`SqlAllParams<S>`（SELECT / INSERT/UPDATE/DELETE ... RETURNING）/ `RunParams<S>`（INSERT/UPDATE/DELETE）
+### Parameter types: `SqlAllParams<S>` (SELECT / INSERT/UPDATE/DELETE ... RETURNING) / `RunParams<S>` (INSERT/UPDATE/DELETE)
 
-1. 扫描 SQL 中所有 `@identifier` 引用
-2. 从 SQL 提取表名（SELECT 用 `_MatchSelect`，DML 用 `_MatchInsert` / `_MatchUpdate` / `_MatchDelete` 匹配）
-3. 查 `Tables[表名][参数名]` 得到每个参数的具体类型
-4. 合并为 `{ 参数名: 类型 }`
+1. Scan the SQL for all `@identifier` references
+2. Extract the table name from the SQL (SELECT via `_MatchSelect`; DML via `_MatchInsert` / `_MatchUpdate` / `_MatchDelete`)
+3. Look up `Tables[table][paramName]` to get each parameter's concrete type
+4. Merge into `{ paramName: type }`
 
-WHERE 支持的操作符：`=`, `>=`, `<=`, `!=`, `<>`, `>`, `<`, `LIKE`, `NOT LIKE`, `IN`, `NOT IN`, `BETWEEN ... and ...`。
-`LIKE`/`NOT LIKE` 的参数类型按列类型推导（TEXT 列 → `string`）；LIKE 的 `%`/`_` 通配符写在参数值里，不进入 SQL 字符串。
-SELECT 额外把 `LIMIT` / `OFFSET` 中的 `@参数` 类型定为 `number`。
+WHERE supports the operators: `=`, `>=`, `<=`, `!=`, `<>`, `>`, `<`, `LIKE`, `NOT LIKE`, `IN`, `NOT IN`, `BETWEEN ... and ...`.
+`LIKE`/`NOT LIKE` parameter types derive from the column type (TEXT column → `string`); the `%`/`_` wildcards go inside the parameter value, not the SQL string.
+For SELECT, `@params` in `LIMIT` / `OFFSET` are additionally typed as `number`.
 
-### 返回值类型：`SqlAllResult<S>`
+### Return types: `SqlAllResult<S>`
 
-- `SELECT * FROM 表名` → `Tables[表名][]`；`INSERT/UPDATE/DELETE ... RETURNING 列` → 操作行（`{ 列: 类型 }[]`）
-- `SELECT 列1,列2 FROM 表名` → `{ 列1: 类型, 列2: 类型 }[]`
-- 多表 JOIN 时 `*` 返回各表字段的合并（交集）类型
-- WHERE 中的 `Tbl.Col IS NOT NULL` / `Tbl.Col IS NULL` 会进一步收窄对应列（去空 / 恒 `null`），
-  `SELECT *` 与显式列两条路径都生效
-- 聚合列按 SQL 语义建模（空集/全 NULL 时 SUM/AVG/MAX/MIN 返回 NULL）：
+- `SELECT * FROM <table>` → `Tables[table][]`; `INSERT/UPDATE/DELETE ... RETURNING <cols>` → affected rows (`{ col: type }[]`)
+- `SELECT col1, col2 FROM <table>` → `{ col1: type, col2: type }[]`
+- In a multi-table JOIN, `*` returns the merge (intersection) of each table's fields
+- A `Tbl.Col IS NOT NULL` / `Tbl.Col IS NULL` in WHERE narrows the corresponding column (drops null / constant `null`); both the `SELECT *` and explicit-column paths apply
+- Aggregate columns follow SQL semantics (SUM/AVG/MAX/MIN return NULL on empty set / all-NULL):
   - `COUNT(*)` → `number`
   - `SUM(x)` / `AVG(x)` / `MAX(x)` / `MIN(x)` → `number | null`
   - `GROUP_CONCAT(x)` → `string | null`
-- 空集行为（SQLite 语义）：
-  - 省略 GROUP BY 的聚合查询（全局聚合）恒返回 1 行：`COUNT`→`0`、`SUM/AVG/MAX/MIN`→`null`
-  - 带 GROUP BY 的空集返回 0 行
-  - 两者都可用 `?? 0` 等兜底归一
+- Empty-set behavior (SQLite semantics):
+  - An aggregate query without GROUP BY (global aggregate) always returns 1 row: `COUNT`→`0`, `SUM/AVG/MAX/MIN`→`null`
+  - An empty set with GROUP BY returns 0 rows
+  - Both can be normalized with a `?? 0` fallback
 
-## 设计边界（刻意不做）
+## Design boundaries (intentionally unsupported)
 
-以下均为**刻意的实现简化**，不是缺陷。匹配失败时类型退化（`unknown` / `never` / `{}`）本身就是可见的警示信号，提醒调用方该写法不在支持范围内。
+All of the following are **deliberate implementation simplifications, not bugs**. A failed match degrading the type (`unknown` / `never` / `{}`) is itself the visible warning signal that tells the caller the pattern is out of scope.
 
-- **SELECT 四要件强制**：`WHERE` / `ORDER BY` / `LIMIT` / `OFFSET` 缺一不可，是为了让 `_MatchSelect` 只维护固定变体（带/不带 GROUP BY），匹配失败即 `unknown`。不提供"无 WHERE"、"无 LIMIT/OFFSET"的省略写法
-  - 占位成分与 SQL 语义等效（实测 `EXPLAIN QUERY PLAN` 一致）：
-    - `WHERE 1=1` ≡ 不写 WHERE（SQLite 常量折叠，查询计划不变）
-    - `LIMIT -1` ≡ 无行数上限（负 LIMIT 即无上限，OFFSET 仍照常生效）；`OFFSET 0` ≡ 从第一行起
-    - **`ORDER BY 1` 不等价于无 ORDER BY**——它按第一列排序，对单行/聚合查询无影响才可作占位；真实排序需求必须写实际子句（如 `createdAt DESC, id DESC`）
-- **表别名**：必须不写别名，`FROM user u` 解析失败
-- **GLOB**：SQLite 特有、大小写敏感，刻意不支持（`LIKE` 已覆盖常见匹配需求）
-- **CASE WHEN / 标量函数**（`strftime`/`ifnull` 等）：非聚合列表达式解析不了 → `unknown`（可见信号）
-- **子查询 / UNION / INSERT SELECT / INSERT DEFAULT VALUES**
-- **JOIN 拼写**：仅 `LEFT JOIN` / `INNER JOIN`；`LEFT OUTER JOIN`、`RIGHT`/`FULL`/`CROSS`/`NATURAL` 均不支持
-- **`SELECT *, COUNT(*) AS c` 混合投影**：列列表含 `*` 且非纯 `*` 时，`*` 部分解析为 `{}`（该写法本身无可靠语义，退化即警示）
-- **`GROUP_CONCAT(x, y)` 多参数**：列列表按 `", "` 切分，函数内逗号会被误拆 → 类型退化（仅支持单参）
-- **HAVING / ORDER BY 不参与参数提取**：`HAVING COUNT(*) > @min`、`ORDER BY @col` 中的参数会被丢弃（动态排序的替代方案见「动态排序」小节）
-- **UPDATE/DELETE 无 WHERE**：模板强制 WHERE
-- **INSERT/UPDATE/DELETE ... RETURNING**：只支持裸列名列表或 `*`；`表名.列` 前缀、`AS` 别名、表达式均不支持（类型退化为 `{}`）
-- **UPDATE SET 表达式**（如 `count = count + 1`）：`SetParams` 只认 `列名 = @参数` 形式
-- **CREATE TABLE 必须带 `IF NOT EXISTS`**：只支持 `CREATE [TEMP] TABLE IF NOT EXISTS <name>`，漏写时 `Schema` 返回 `{}`（运行时重复建表也会报 `table already exists`，类型层信号与之一致）
-- **表级约束不写空行**：必须按「列区末列逗号 + 空行」约定书写；漏写空行（约束直接接在列区后）会被当列解析出 `PRIMARY`/`UNIQUE`/`CHECK`/`FOREIGN` 等幽灵列（警示信号）
-- **外键类型传播仅列级单列**：表级 `FOREIGN KEY (...)`、复合外键、`REFERENCES tbl` 省略列不参与（表级约束块整体忽略）；链式外键只传导一层；`Schema<S>` 不解析外键（用 `SchemaFks` + `ResolveFks`）
+- **SELECT four mandatory clauses**: `WHERE` / `ORDER BY` / `LIMIT` / `OFFSET` are all required, so that `_MatchSelect` only maintains fixed variants (with/without GROUP BY); a failed match is `unknown`. Omitted forms ("no WHERE", "no LIMIT/OFFSET") are not provided
+  - The placeholder components are SQL-semantically equivalent (verified via `EXPLAIN QUERY PLAN`):
+    - `WHERE 1=1` ≡ no WHERE (SQLite constant folding; identical query plan)
+    - `LIMIT -1` ≡ no row cap (a negative LIMIT means no limit, OFFSET still applies); `OFFSET 0` ≡ start from the first row
+    - **`ORDER BY 1` is NOT equivalent to no ORDER BY** — it sorts by the first column and is only a valid placeholder when it has no effect on single-row/aggregate queries; real sorting needs a real clause (e.g. `createdAt DESC, id DESC`)
+- **Table aliases**: never write an alias; `FROM user u` fails to parse
+- **GLOB**: SQLite-specific and case-sensitive, deliberately unsupported (`LIKE` covers the common matching needs)
+- **CASE WHEN / scalar functions** (`strftime`/`ifnull`, etc.): non-aggregate column expressions cannot be parsed → `unknown` (visible signal)
+- **Subqueries / UNION / INSERT SELECT / INSERT DEFAULT VALUES**
+- **JOIN spellings**: only `LEFT JOIN` / `INNER JOIN`; `LEFT OUTER JOIN`, `RIGHT`/`FULL`/`CROSS`/`NATURAL` are all unsupported
+- **`SELECT *, COUNT(*) AS c` mixed projection**: when the column list contains `*` but is not pure `*`, the `*` part parses to `{}` (the form has no reliable semantics; the degradation is the warning)
+- **`GROUP_CONCAT(x, y)` multi-arg**: the column list is split on `", "`, so a comma inside a function is mis-split → type degrades (single-arg only)
+- **HAVING / ORDER BY do not participate in parameter extraction**: params in `HAVING COUNT(*) > @min` or `ORDER BY @col` are dropped (for dynamic sorting see the "Dynamic sorting" section)
+- **UPDATE/DELETE without WHERE**: the template forces a WHERE
+- **INSERT/UPDATE/DELETE ... RETURNING**: only bare column-name lists or `*`; `table.` prefixes, `AS` aliases, and expressions are unsupported (degrades to `{}`)
+- **UPDATE SET expressions** (e.g. `count = count + 1`): `SetParams` only recognizes `col = @param` form
+- **CREATE TABLE must include `IF NOT EXISTS`**: only `CREATE [TEMP] TABLE IF NOT EXISTS <name>` is supported; omitting it makes `Schema` return `{}` (at runtime a repeated CREATE also errors with `table already exists`, matching the type-level signal)
+- **Table-level constraints without a blank line**: must follow the "last-column comma + blank line" convention; if the blank line is missing (constraints directly after the column area) they get parsed as columns producing `PRIMARY`/`UNIQUE`/`CHECK`/`FOREIGN` phantom columns (warning signal)
+- **FK type propagation is column-level single-column only**: table-level `FOREIGN KEY (...)`, composite FKs, and `REFERENCES tbl` without a column do not participate (the table-level constraint block is ignored wholesale); chained FKs propagate one level only; `Schema<S>` does not resolve FKs (use `SchemaFks` + `ResolveFks`)
 
-## 代码组织
+## Code organization
 
-| 文件 | 职责 |
-|------|------|
-| `typed-sql.ts` | lib——类型体操（Schema / SchemaFks / ResolveFks / SqlAllResult / SqlAllParams / RunParams）+ TypedDb<Schema> class |
-| `typed-sql-test.ts` | 示例表定义 + 编译期类型断言 + 运行时验证 |
+| File | Responsibility |
+|------|----------------|
+| `typed-sql.ts` | lib — type gymnastics (Schema / SchemaFks / ResolveFks / SqlAllResult / SqlAllParams / RunParams) + TypedDb<Schema> class |
+| `typed-sql-test.ts` | sample table definitions + compile-time type assertions + runtime verification |
