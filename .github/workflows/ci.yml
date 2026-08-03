@@ -1,0 +1,24 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node: [24, 26]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - name: Install dev deps (typescript, @types/node)
+        run: npm i -D typescript @types/node --no-audit --no-fund
+      - name: Typecheck
+        run: npx tsc --noEmit --strict --target esnext --module nodenext --moduleResolution nodenext --lib esnext --types node --allowImportingTsExtensions --skipLibCheck typed-sql.ts typed-sql-test.ts
+      - name: Test
+        run: node --experimental-strip-types --test typed-sql-test.ts
