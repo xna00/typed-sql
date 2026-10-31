@@ -339,6 +339,74 @@ type _SarCol = AssertTrue<Equal<
   SqlAllResult<'SELECT ALL user.email AS email, user.phone AS phone FROM user WHERE 1=1 GROUP BY 1 HAVING 1=1 ORDER BY 1 LIMIT -1 OFFSET 0', Tables>,
   { email: string | null; phone: string | null }[]
 >>;
+// 子句分隔符允许换行（换行后不能缩进）
+type _SarMultiline = AssertTrue<Equal<
+  SqlAllResult<`SELECT ALL user.email AS email, user.phone AS phone FROM user
+WHERE 1=1
+ORDER BY 1
+LIMIT -1
+OFFSET 0`, Tables>,
+  { email: string | null; phone: string | null }[]
+>>;
+type _SarMultilineWithGroupBy = AssertTrue<Equal<
+  SqlAllResult<`SELECT ALL COUNT(*) AS count FROM markRecord
+WHERE 1=1 GROUP BY 1 HAVING 1=1
+ORDER BY 1
+LIMIT -1
+OFFSET 0`, Tables>,
+  { count: number }[]
+>>;
+type _SapMultiline = AssertTrue<Equal<
+  SqlAllParams<`SELECT ALL * FROM markRecord
+WHERE markRecord.userId = @userId
+ORDER BY 1
+LIMIT @limit
+OFFSET @offset`, Tables>,
+  { userId: string; limit: number; offset: number }
+>>;
+// 允许以换行开头/结尾（多行模板字符串的自然写法）
+type _SarMultilineWrapped = AssertTrue<Equal<
+  SqlAllResult<`
+SELECT ALL * FROM user
+WHERE user.externalUserId = @externalUserId
+ORDER BY 1
+LIMIT -1
+OFFSET 0
+`, Tables>,
+  Tables['user'][]
+>>;
+type _SapMultilineWrapped = AssertTrue<Equal<
+  SqlAllParams<`
+SELECT ALL * FROM markRecord
+WHERE markRecord.userId = @userId
+ORDER BY 1
+LIMIT @limit
+OFFSET @offset
+`, Tables>,
+  { userId: string; limit: number; offset: number }
+>>;
+type _RunParamsMultiline = AssertTrue<Equal<
+  RunParams<`
+INSERT OR ABORT INTO user (externalUserId, username, passwordHash, createdAt, updatedAt) VALUES (@externalUserId, @username, @passwordHash, @createdAt, @updatedAt)
+`, Tables>,
+  { externalUserId: string; username: string; passwordHash: string; createdAt: string; updatedAt: string }
+>>;
+type _RunParamsMultilineInsert = AssertTrue<Equal<
+  RunParams<`INSERT OR ABORT INTO user (externalUserId, username, passwordHash, createdAt, updatedAt)
+VALUES (@externalUserId, @username, @passwordHash, @createdAt, @updatedAt)`, Tables>,
+  { externalUserId: string; username: string; passwordHash: string; createdAt: string; updatedAt: string }
+>>;
+type _RunParamsMultilineUpdate = AssertTrue<Equal<
+  RunParams<`UPDATE OR ABORT user
+SET token = @token, updatedAt = @updatedAt
+WHERE user.externalUserId = @externalUserId`, Tables>,
+  { token: string | null; updatedAt: string; externalUserId: string }
+>>;
+type _RunParamsMultilineDelete = AssertTrue<Equal<
+  RunParams<`DELETE FROM markRecord
+WHERE markRecord.id = @id`, Tables>,
+  { id: number }
+>>;
 type _SarAggCount = AssertTrue<Equal<
   SqlAllResult<'SELECT ALL COUNT(*) AS count FROM markRecord WHERE 1=1 GROUP BY 1 HAVING 1=1 ORDER BY 1 LIMIT -1 OFFSET 0', Tables>,
   { count: number }[]
@@ -1030,6 +1098,29 @@ describe('TypedDb', () => {
     it('get with column select returns subset', () => {
       const row = typedDb.prepare("SELECT ALL label AS label FROM testTbl WHERE id = @id GROUP BY 1 HAVING 1=1 ORDER BY 1 LIMIT -1 OFFSET 0").get({ id: 1 })!;
       assert.equal(row.label, 'hello');
+    });
+
+    it('supports newline-separated clauses (no indentation)', () => {
+      const rows = typedDb.prepare(`SELECT ALL label AS label, val AS val FROM testTbl
+WHERE testTbl.id = @id
+ORDER BY 1
+LIMIT -1
+OFFSET 0`).all({ id: 1 });
+      assert.equal(rows.length, 1);
+      assert.equal(rows[0].label, 'hello');
+      assert.equal(rows[0].val, 42);
+    });
+
+    it('supports leading/trailing newlines in the SQL string', () => {
+      const rows = typedDb.prepare(`
+SELECT ALL label AS label FROM testTbl
+WHERE testTbl.id = @id
+ORDER BY 1
+LIMIT -1
+OFFSET 0
+`).all({ id: 1 });
+      assert.equal(rows.length, 1);
+      assert.equal(rows[0].label, 'hello');
     });
   });
 });

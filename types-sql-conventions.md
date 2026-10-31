@@ -65,13 +65,31 @@ VALUES (@a,@b)                                                       # missing s
 
 | Rule | Reason |
 |------|--------|
-| SQL strings must have **no leading or trailing whitespace** | The type matches `SELECT`/`INSERT`/`UPDATE` directly at the start |
-| `FROM <table>` must be followed by **exactly one space** before ` WHERE`, no extra whitespace | The template `FROM ${FromClause} WHERE` extracts the table name; extra whitespace after the table name makes `_NewTables` miss the table and all columns degrade to `{}` |
+| SQL strings must have **no leading or trailing spaces** (leading/trailing **newlines are allowed**) | `TrimNewlines` strips leading/trailing `\n` before matching `SELECT`/`INSERT`/`UPDATE` |
+| `FROM <table>` / `WHERE <cond>` / `ORDER BY ...` / `LIMIT ...` / `OFFSET ...` are separated by **exactly one space or one newline**, with **no indentation** after a newline | Clause boundaries match `${Sp}` where `Sp = ' ' \| '\n'`; a newline followed by spaces is absorbed into the preceding segment (e.g. the table name), making `_NewTables` miss the table and degrade types to `{}` |
 | CREATE TABLE **column definitions must start at column 0** (no indentation) | `ParseCols` splits columns with `Split<Rest, ",\n">`; table-level constraints are truncated at `,\n\n` (last-column comma + blank line), see "Table-level constraints" below |
 | SELECT column lists need **comma + one space**: `col1, col2` | `Split<Cols, ', '>` separates column names |
 | SELECT template: `SELECT {ALL\|DISTINCT} <cols> FROM <table> WHERE <cond> ORDER BY ... LIMIT ... OFFSET ...`, **GROUP BY/HAVING optional but paired** | `_MatchSelect` matches two variants with/without GROUP BY; a GROUP BY swallowed into WHERE breaks `IS NULL` narrowing |
 | Aggregates must sit **at the start of the column expression**, not wrapped in other functions (e.g. `COALESCE(SUM(x),0)`) | `ColType` only matches expressions starting with an aggregate; wrapping falls through to the `T.C` branch and yields `unknown` |
 | The `AND` in `BETWEEN` is lowercase `and` | Prevents being split by the WHERE-level ` AND ` |
+
+### Multi-line SQL
+
+Clause boundaries accept **exactly one space or one newline** (`Sp = ' ' | '\n'`), so you can write:
+
+```sql
+SELECT ALL * FROM markRecord
+WHERE markRecord.userId = @userId
+ORDER BY createdAt DESC, id DESC
+LIMIT @limit
+OFFSET @offset
+```
+
+- Relaxed boundaries: before `WHERE` / `ORDER BY` / `LIMIT` / `OFFSET` (SELECT), before `VALUES` / `RETURNING` (INSERT), before `SET` / `WHERE` / `RETURNING` (UPDATE), before `WHERE` / `RETURNING` (DELETE)
+- Inside the column list, `VALUES (...)`, and the `SET` list, the separator is still **comma + one space** — you cannot break at commas
+- **No indentation after a newline**: `FROM markRecord\n  WHERE` absorbs `"markRecord\n "` as the table name and degrades silently
+- Leading/trailing **newlines are allowed** (`TrimNewlines` strips them), but leading/trailing **spaces are not** — avoid indented template literals
+- `GROUP BY` / `HAVING` must stay on the `WHERE` line: `... WHERE 1=1 GROUP BY 1 HAVING 1=1\nORDER BY ...`
 
 ### Table-level constraints
 

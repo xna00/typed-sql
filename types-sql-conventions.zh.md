@@ -65,13 +65,31 @@ VALUES (@a,@b)                                                       # 逗号后
 
 | 规则 | 原因 |
 |------|------|
-| SQL 字符串 **无前导或尾随空白** | 类型以 `SELECT`/`INSERT`/`UPDATE` 开头直接匹配 |
-| `FROM 表名` 后必须**恰好一个空格**再接 ` WHERE`，无多余空白 | 模板用 `FROM ${FromClause} WHERE` 取表名；表名后多余空格会让 `_NewTables` 查不到表，列全部退化为 `{}` |
+| SQL 字符串 **无前导或尾随空格**（前导/尾随**换行可以**） | `TrimNewlines` 先剥掉首尾 `\n`，再匹配 `SELECT`/`INSERT`/`UPDATE` 开头 |
+| `FROM 表名` / `WHERE` / `ORDER BY` / `LIMIT` / `OFFSET` 之间是**恰好一个空格或一个换行**，换行后**不能缩进** | 子句边界用 `${Sp}`（`' ' \| '\n'`）匹配；换行后接空格会被并入前一段（如表名），导致 `_NewTables` 查不到表、类型退化为 `{}` |
 | CREATE TABLE **列定义顶格写**（每行 column 0 开始，无缩进） | `ParseCols` 用 `Split<Rest, ",\n">` 拆分列；表级约束用 `,\n\n`（末列逗号 + 空行）截断，见下方「表级约束」 |
 | SELECT 列列表 **逗号后跟一个空格**：`col1, col2` | `Split<Cols, ', '>` 分隔列名 |
 | SELECT 模板：`SELECT {ALL\|DISTINCT} <cols> FROM <table> WHERE <cond> ORDER BY ... LIMIT ... OFFSET ...`，**GROUP BY/HAVING 可选且成对出现** | `_MatchSelect` 按带/不带 GROUP BY 两个变体匹配；GROUP BY 若被吞进 WHERE 会破坏 `IS NULL` 收窄 |
 | 聚合必须位于**列表达式开头**，不得包在其他函数内（如 `COALESCE(SUM(x),0)`） | `ColType` 只匹配以聚合开头的表达式，包裹后落入 T.C 分支得 `unknown` |
 | `BETWEEN` 中的 `AND` 用小写 `and` | 避免被 WHERE-level ` AND ` 误拆分 |
+
+### 多行 SQL
+
+子句边界允许「单个空格或单个换行」（`Sp = ' ' | '\n'`），因此可以分行写：
+
+```sql
+SELECT ALL * FROM markRecord
+WHERE markRecord.userId = @userId
+ORDER BY createdAt DESC, id DESC
+LIMIT @limit
+OFFSET @offset
+```
+
+- 放开的边界：SELECT 的 `WHERE` / `ORDER BY` / `LIMIT` / `OFFSET` 之前；INSERT 的 `VALUES` / `RETURNING` 之前；UPDATE 的 `SET` / `WHERE` / `RETURNING` 之前；DELETE 的 `WHERE` / `RETURNING` 之前
+- 列列表、`VALUES (...)`、`SET` 列表内部**仍是 `, ` 单空格**，不能按逗号换行
+- **换行后不能缩进**：`FROM markRecord\n  WHERE` 会把 `"markRecord\n "` 当成表名，静默退化
+- 字符串首尾可以有换行（`TrimNewlines` 会剥掉），但**不能有首尾空格**；所以别用带缩进的三引号风格
+- `GROUP BY` / `HAVING` 仍需与 `WHERE` 同行：`... WHERE 1=1 GROUP BY 1 HAVING 1=1\nORDER BY ...`
 
 ### 表级约束
 

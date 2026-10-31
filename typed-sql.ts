@@ -130,10 +130,36 @@ export type Schema<S extends string> =
 
 // ── SELECT pattern match ──
 
+/**
+ * 子句分隔符：允许单个空格或单个换行。
+ *
+ * 这样 SELECT 可以分行写（FROM / WHERE / ORDER BY / LIMIT / OFFSET 各占一行），
+ * 但**换行后不能缩进**——缩进会被并入前一段（如表名），导致表查不到、类型退化。
+ */
+type Sp = ' ' | '\n';
+
+/**
+ * 允许 SQL 以换行开头/结尾（多行模板字符串的自然写法），但**不允许**前导/尾随空格。
+ *
+ * 例如：
+ * ```
+ * td().prepare(`
+ * SELECT ALL ... FROM t
+ * WHERE ...
+ * `)
+ * ```
+ */
+type TrimNewlines<S extends string> =
+  S extends `\n${infer R}` ? TrimNewlines<R>
+  : S extends `${infer R}\n` ? TrimNewlines<R>
+  : S;
+
+type Nl<S extends string> = TrimNewlines<S>;
+
 type _MatchSelect<S extends string> =
-  S extends `SELECT ${'ALL' | 'DISTINCT'} ${infer Cols} FROM ${infer FromClause} WHERE ${infer WhereClause} GROUP BY ${infer _GroupBy} HAVING ${infer Having} ORDER BY ${infer _OrderBy} LIMIT ${infer Limit} OFFSET ${infer Offset}`
+  S extends `SELECT ${'ALL' | 'DISTINCT'} ${infer Cols} FROM ${infer FromClause}${Sp}WHERE ${infer WhereClause} GROUP BY ${infer _GroupBy} HAVING ${infer Having}${Sp}ORDER BY ${infer _OrderBy}${Sp}LIMIT ${infer Limit}${Sp}OFFSET ${infer Offset}`
   ? { cols: Cols; from: FromClause; where: WhereClause; limit: Limit; offset: Offset }
-  : S extends `SELECT ${'ALL' | 'DISTINCT'} ${infer Cols} FROM ${infer FromClause} WHERE ${infer WhereClause} ORDER BY ${infer _OrderBy} LIMIT ${infer Limit} OFFSET ${infer Offset}`
+  : S extends `SELECT ${'ALL' | 'DISTINCT'} ${infer Cols} FROM ${infer FromClause}${Sp}WHERE ${infer WhereClause}${Sp}ORDER BY ${infer _OrderBy}${Sp}LIMIT ${infer Limit}${Sp}OFFSET ${infer Offset}`
   ? { cols: Cols; from: FromClause; where: WhereClause; limit: Limit; offset: Offset }
   : unknown;
 
@@ -142,23 +168,23 @@ type _MatchSelect<S extends string> =
 type SqlConflict = 'ROLLBACK' | 'ABORT' | 'FAIL' | 'IGNORE' | 'REPLACE';
 
 type _MatchInsert<S extends string> =
-  S extends `INSERT OR ${SqlConflict} INTO ${infer Tbl} (${infer Cols}) VALUES (${infer Values}) RETURNING ${infer Returning}`
+  S extends `INSERT OR ${SqlConflict} INTO ${infer Tbl} (${infer Cols})${Sp}VALUES (${infer Values})${Sp}RETURNING ${infer Returning}`
   ? { table: Tbl; cols: Cols; values: Values; returning: Returning }
-  : S extends `INSERT OR ${SqlConflict} INTO ${infer Tbl} (${infer Cols}) VALUES (${infer Values})`
+  : S extends `INSERT OR ${SqlConflict} INTO ${infer Tbl} (${infer Cols})${Sp}VALUES (${infer Values})`
     ? { table: Tbl; cols: Cols; values: Values }
     : unknown;
 
 type _MatchUpdate<S extends string> =
-  S extends `UPDATE OR ${SqlConflict} ${infer Tbl} SET ${infer SetClause} WHERE ${infer WhereClause} RETURNING ${infer Returning}`
+  S extends `UPDATE OR ${SqlConflict} ${infer Tbl}${Sp}SET ${infer SetClause}${Sp}WHERE ${infer WhereClause}${Sp}RETURNING ${infer Returning}`
   ? { table: Tbl; set: SetClause; where: WhereClause; returning: Returning }
-  : S extends `UPDATE OR ${SqlConflict} ${infer Tbl} SET ${infer SetClause} WHERE ${infer WhereClause}`
+  : S extends `UPDATE OR ${SqlConflict} ${infer Tbl}${Sp}SET ${infer SetClause}${Sp}WHERE ${infer WhereClause}`
     ? { table: Tbl; set: SetClause; where: WhereClause }
     : unknown;
 
 type _MatchDelete<S extends string> =
-  S extends `DELETE FROM ${infer Tbl} WHERE ${infer WhereClause} RETURNING ${infer Returning}`
+  S extends `DELETE FROM ${infer Tbl}${Sp}WHERE ${infer WhereClause}${Sp}RETURNING ${infer Returning}`
   ? { table: Tbl; where: WhereClause; returning: Returning }
-  : S extends `DELETE FROM ${infer Tbl} WHERE ${infer WhereClause}`
+  : S extends `DELETE FROM ${infer Tbl}${Sp}WHERE ${infer WhereClause}`
     ? { table: Tbl; where: WhereClause }
     : unknown;
 
@@ -269,11 +295,11 @@ type SetParams<SS extends string[], Tbl extends {}, R = {}> =
   ? SetParams<Rest, Tbl, R & { [K in Name]: Tbl[Col & keyof Tbl] }>
   : R;
 export type RunParams<S extends string, Tbls extends {}> =
-  _MatchInsert<S> extends infer M extends { table: keyof Tbls, values: string }
+  _MatchInsert<Nl<S>> extends infer M extends { table: keyof Tbls, values: string }
   ? ValueParams<Split<M['values'], ", ">, Tbls[M['table']] & {}>
-  : _MatchUpdate<S> extends infer M extends { table: keyof Tbls, set: string, where: string }
+  : _MatchUpdate<Nl<S>> extends infer M extends { table: keyof Tbls, set: string, where: string }
     ? SetParams<Split<M["set"], ", ">, Tbls[M['table']] & {}> & WhereParams<M['where'], Tbls>
-    : _MatchDelete<S> extends infer M extends { where: string }
+    : _MatchDelete<Nl<S>> extends infer M extends { where: string }
       ? WhereParams<M['where'], Tbls>
       : never;
 
@@ -311,13 +337,13 @@ type ReturningResult<R extends string, Tbl extends {}> =
   : { [K in Split<R, ', '>[number] & keyof Tbl]: Tbl[K] };
 
 export type SqlAllResult<S extends string, Tbls extends {}> =
-  _MatchSelect<S> extends infer M extends { cols: string; from: string; where: string }
+  _MatchSelect<Nl<S>> extends infer M extends { cols: string; from: string; where: string }
   ? _SelectResult<M['cols'], M['from'], M['where'], Tbls>
-  : _MatchInsert<S> extends infer M extends { table: keyof Tbls; values: string; returning: string }
+  : _MatchInsert<Nl<S>> extends infer M extends { table: keyof Tbls; values: string; returning: string }
     ? ReturningResult<M['returning'], Tbls[M['table']] & {}>[]
-    : _MatchUpdate<S> extends infer M extends { table: keyof Tbls; set: string; where: string; returning: string }
+    : _MatchUpdate<Nl<S>> extends infer M extends { table: keyof Tbls; set: string; where: string; returning: string }
       ? ReturningResult<M['returning'], Tbls[M['table']] & {}>[]
-      : _MatchDelete<S> extends infer M extends { table: keyof Tbls; where: string; returning: string }
+      : _MatchDelete<Nl<S>> extends infer M extends { table: keyof Tbls; where: string; returning: string }
         ? ReturningResult<M['returning'], Tbls[M['table']] & {}>[]
         : never;
 
@@ -325,18 +351,18 @@ export type SqlGetResult<S extends string, Tbls extends {}> =
   SqlAllResult<S, Tbls>[number] | undefined;
 
 export type SqlRunResult<S extends string, Tbls extends {}> =
-  S extends `${'INSERT' | 'UPDATE' | 'DELETE'}${string}`
+  Nl<S> extends `${'INSERT' | 'UPDATE' | 'DELETE'}${string}`
   ? { lastInsertRowid: number; changes: number }
   : never;
 
 export type SqlAllParams<S extends string, Tbls extends {}> =
-  _MatchSelect<S> extends infer W extends { where: string; limit: string; offset: string }
+  _MatchSelect<Nl<S>> extends infer W extends { where: string; limit: string; offset: string }
   ? WhereParams<W['where'], Tbls> & { [K in AtParamName<W['limit'] | W['offset']>]: number }
-  : _MatchInsert<S> extends infer M extends { table: keyof Tbls, values: string, returning: string }
+  : _MatchInsert<Nl<S>> extends infer M extends { table: keyof Tbls, values: string, returning: string }
     ? ValueParams<Split<M['values'], ", ">, Tbls[M['table']] & {}>
-    : _MatchUpdate<S> extends infer M extends { table: keyof Tbls, set: string, where: string, returning: string }
+    : _MatchUpdate<Nl<S>> extends infer M extends { table: keyof Tbls, set: string, where: string, returning: string }
       ? SetParams<Split<M['set'], ", ">, Tbls[M['table']] & {}> & WhereParams<M['where'], Tbls>
-      : _MatchDelete<S> extends infer M extends { table: keyof Tbls, where: string, returning: string }
+      : _MatchDelete<Nl<S>> extends infer M extends { table: keyof Tbls, where: string, returning: string }
         ? WhereParams<M['where'], Tbls>
         : never;
 
